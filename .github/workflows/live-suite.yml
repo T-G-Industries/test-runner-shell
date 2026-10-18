@@ -1,0 +1,85 @@
+name: Run a suite
+
+# Started by hand only. The only trigger in this file is workflow_dispatch; do not
+# add another (see SECURITY.md). The suite is an opaque code, so the run title
+# shows no module name.
+run-name: "run ${{ inputs.suite_code }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Full 40-character commit SHA to test"
+        type: string
+        required: true
+      suite_code:
+        description: "Suite code (s01, s02, ...)"
+        type: string
+        required: true
+      pr:
+        description: "Optional pull request number for the detailed result comment"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: suite-${{ inputs.suite_code }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash -eo pipefail {0}
+
+jobs:
+  run:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    # Secrets live in this environment, restricted to the main branch of this repository.
+    environment: private-code
+    env:
+      PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+      PRIVATE_TOKEN: ${{ secrets.PRIVATE_TOKEN }}
+      SHA: ${{ inputs.sha }}
+      SUITE_CODE: ${{ inputs.suite_code }}
+      PR: ${{ inputs.pr }}
+      WORK: ${{ github.workspace }}/../w
+      OUT: ${{ runner.temp }}/out
+      TZ: Asia/Kolkata
+    steps:
+      - name: Validate the inputs
+        run: |
+          [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be 40 hex characters"; exit 1; }
+          [[ $SUITE_CODE =~ ^s[0-9]{2}$ ]] || { echo "::error::bad suite code"; exit 1; }
+          [[ -z $PR || $PR =~ ^[0-9]{1,6}$ ]] || { echo "::error::bad pr number"; exit 1; }
+          [ -n "$PRIVATE_REPO" ] && [ -n "$PRIVATE_TOKEN" ] || { echo "::error::secrets missing"; exit 1; }
+
+      - name: Check out this repository (scripts only)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Mark the commit pending
+        run: bash scripts/report.sh pending
+
+      - name: Fetch the private code (output withheld)
+        run: bash scripts/fetch-private.sh "$WORK"
+
+      - name: Free runner disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Run the suite (output withheld)
+        id: suite
+        run: bash scripts/run-private.sh "$WORK" "$SUITE_CODE"
+
+      - name: Report (numbers only)
+        if: always()
+        run: |
+          python3 -I scripts/sanitize.py "$OUT/result.json" "$OUT/exit_code" "$OUT/status.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          bash scripts/report.sh final
+
+      - name: Remove the private checkout
+        if: always()
+        run: rm -rf "$WORK" "$OUT/run.log"

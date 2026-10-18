@@ -1,0 +1,3 @@
+title = "shell repository"
+[extend]
+useDefault = true
