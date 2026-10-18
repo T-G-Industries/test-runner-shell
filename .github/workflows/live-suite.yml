@@ -46,7 +46,7 @@ jobs:
       SUITE_CODE: ${{ inputs.suite_code }}
       PR: ${{ inputs.pr }}
       WORK: ${{ github.workspace }}/../w
-      OUT: ${{ runner.temp }}/out
+      OUT: ${{ github.workspace }}/../out
       TZ: Asia/Kolkata
     steps:
       - name: Validate the inputs
