@@ -26,7 +26,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: suite-${{ inputs.suite_code }}
+  group: suite-${{ inputs.suite_code }}-${{ inputs.sha }}
   cancel-in-progress: false
 
 defaults:
