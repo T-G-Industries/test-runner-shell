@@ -440,28 +440,24 @@ class Run(Helpers, unittest.TestCase):
             self.assertEqual(self.read(d, "env.txt.who").strip(), "pr-entry")
 
 
-PREFIX = "pin/"  # stands in for the repository variable that holds the allowed branch prefix
 PIN_ENTRY = ('#!/usr/bin/env bash\necho pinned-entry > "$ENVDUMP.who"\ncp scripts/public-checks.sh "$ENVDUMP.checks"\n'
              'env | sort > "$ENVDUMP"\necho "$1" > "$ENVDUMP.code"\necho \'{}\' > "$RESULT_JSON"\n')
 PIN_CHECKS = "# checks from the pinned branch\n"
 PIN = {"scripts/public-runner.sh": PIN_ENTRY, "scripts/public-checks.sh": PIN_CHECKS}
-BAD_REFS = ["pin/../main", "pin/a/../b", "pin/a..b", "pin/a b", "pin/a\tb", "pin/a\nb", "main", "origin/main",
-            "refs/heads/pin/x", "refs/remotes/origin/pin/x", "other/x", "Pin/x", "pin", "pin/", "/pin/x",
-            "pin/x/", "pin//x", "pin/a//b", "pin/x//", "pin/x@{1}", "pin/x@{u}", "pin/x;true", "pin/$(true)", "pin/x*",
-            "pin/x?", "pin/x~1", "pin/x^", "pin/x:y", "pin/x\\y", "pin/" + "a" * 101, "origin/pin/x", "../pin/x",
-            "pin/\u00e9"]
+BAD_REFS = ["pin/../main", "pin/a/../b", "pin/a..b", "pin/a b", "pin/a\tb", "pin/a\nb", "main", "HEAD", "origin/main",
+            "refs/heads/pin/x", "refs/remotes/origin/pin/x", "pin/", "/pin/x", "pin/x/", "pin//x", "pin/a//b", "pin/x//",
+            "pin/x@{1}", "pin/x@{u}", "pin/x;true", "pin/$(true)", "pin/x*", "pin/x?", "pin/x~1", "pin/x^", "pin/x:y",
+            "pin/x\\y", "pin/" + "a" * 125, "x" * 129, "origin/pin/x", "../pin/x", "pin/\u00e9", "-pin/x", ".pin/x"]
 
 
 class PinnedBranch(Helpers, unittest.TestCase):
     """TRIAL-ONLY: check codes may take their entry scripts from a named private branch."""
 
-    def run_pinned(self, code, ref, extra_env=None, refs=None, pr=None, main=MAIN, prefix=PREFIX):
+    def run_pinned(self, code, ref, extra_env=None, refs=None, pr=None, main=MAIN):
         with tempfile.TemporaryDirectory() as d:
             work = make_work(d, pr or {"scripts/public-runner.sh": EVIL_ENTRY, "scripts/public-checks.sh": "x"},
                              main, refs if refs is not None else {"pin/trial-1": PIN})
             env = {} if ref is None else {"PIN_REF": ref}
-            if prefix is not None:
-                env["PIN_PREFIX"] = prefix
             env.update(extra_env or {})
             r, out = self.run_script(d, work, code, extra=env)
             seen = {n: self.read(d, n) if os.path.exists(os.path.join(d, n)) else None
@@ -479,8 +475,7 @@ class PinnedBranch(Helpers, unittest.TestCase):
             work = make_work(d, {"scripts/public-runner.sh": EVIL_ENTRY, "scripts/public-checks.sh": "x"},
                              kw.get("main", MAIN), kw.get("refs", {"pin/trial-1": PIN}))
             env = {} if ref is None else {"PIN_REF": ref}
-            if kw.get("prefix", PREFIX) is not None:
-                env["PIN_PREFIX"] = kw.get("prefix", PREFIX)
+            env.update(kw.get("extra_env", {}))
             r, out = self.run_script(d, work, code, extra=env)
             self.assert_setup_not_a_result(d, r, out)
             logs = r.stdout + r.stderr + self.read(d, "out/run.log")
@@ -496,11 +491,37 @@ class PinnedBranch(Helpers, unittest.TestCase):
             self.assertEqual(seen["env.txt.who"].strip(), "main-entry", ref)
             self.assertEqual(seen["env.txt.checks"], GOOD_CHECKS)
 
-    def test_empty_pin_with_no_prefix_configured_is_unchanged(self):
-        _, _, r, out, seen, _ = self.run_pinned("c02", "", prefix=None)
+    def test_a_pin_that_was_asked_for_but_lost_is_a_setup_failure_never_main(self):
+        # PIN_ASKED is set by the workflow whenever an alias was given; if PIN_REF then arrives empty
+        # (an output lost on the way), nothing may run, least of all main's scripts.
+        for ref in (None, ""):
+            self.setup_failure("c01", ref, extra_env={"PIN_ASKED": "1"}, why="from a valid pinned branch")
+        d, work, r, out, seen, logs = self.run_pinned("c04", "", extra_env={"PIN_ASKED": "1"})
+        self.assertIsNone(seen["env.txt.who"])
+        self.assertEqual(seen["exit_code"], "1")
+
+    def test_asked_with_a_good_name_runs_the_pinned_scripts_and_hides_both_variables(self):
+        _, _, r, out, seen, _ = self.run_pinned("c01", "pin/trial-1", extra_env={"PIN_ASKED": "1"})
+        self.assertEqual(seen["env.txt.who"].strip(), "pinned-entry")
+        for name in ("PIN_REF", "PIN_ASKED"):
+            self.assertFalse(("\n" + name + "=") in ("\n" + seen["env.txt"]), name)
+
+    def test_empty_asked_flag_changes_nothing(self):
+        _, _, r, out, seen, _ = self.run_pinned("c01", "", extra_env={"PIN_ASKED": ""})
         self.assertEqual(seen["env.txt.who"].strip(), "main-entry")
-        _, _, r, out, seen, _ = self.run_pinned("c02", None, prefix="")
+
+    def test_suite_codes_ignore_the_asked_flag(self):
+        _, _, r, out, seen, logs = self.run_pinned(
+            "s05", "", extra_env={"PIN_ASKED": "1"}, pr={"scripts/public-runner.sh": EVIL_ENTRY}, main={"README": "x"})
+        self.assertEqual(seen["env.txt.who"].strip(), "pr-entry")
+
+    def test_a_leftover_prefix_variable_is_ignored(self):
+        # the prefix variable no longer exists; a stray one changes nothing, with or without a pin
+        junk = {"PIN_PREFIX": "other/"}
+        _, _, r, out, seen, _ = self.run_pinned("c02", "", extra_env=junk)
         self.assertEqual(seen["env.txt.who"].strip(), "main-entry")
+        _, _, r, out, seen, _ = self.run_pinned("c02", "pin/trial-1", extra_env=junk)
+        self.assertEqual(seen["env.txt.who"].strip(), "pinned-entry")
 
     def test_valid_pin_runs_the_pinned_branch_scripts(self):
         _, _, r, out, seen, _ = self.run_pinned("c03", "pin/trial-1")
@@ -515,7 +536,7 @@ class PinnedBranch(Helpers, unittest.TestCase):
             self.assertEqual(seen["env.txt.who"].strip(), "pinned-entry", code)
 
     def test_pin_names_with_dots_dashes_slashes_are_accepted(self):
-        for name in ("pin/a.b-c_d", "pin/feature/x-1.2", "pin/" + "a" * 100):
+        for name in ("pin/a.b-c_d", "pin/feature/x-1.2", "pin/" + "a" * 100, "other/x", "Pin/X", "plain", "x" * 128):
             _, _, r, out, seen, _ = self.run_pinned("c01", name, refs={name: PIN})
             self.assertEqual(seen["env.txt.who"].strip(), "pinned-entry", name)
 
@@ -529,7 +550,7 @@ class PinnedBranch(Helpers, unittest.TestCase):
         _, _, r, out, seen, logs = self.run_pinned("c01", "pin/trial-1")
         dumped = seen["env.txt"]
         self.assertNotIn(TOKEN, dumped)
-        for name in SECRET_ENV + ("PIN_REF", "PIN_PREFIX"):
+        for name in SECRET_ENV + ("PIN_REF",):
             self.assertFalse(("\n" + name + "=") in ("\n" + dumped), name)
 
     def test_ref_is_never_printed(self):
@@ -549,17 +570,13 @@ class PinnedBranch(Helpers, unittest.TestCase):
         self.assertIsNone(seen["env.txt.who"])
         self.assertEqual(seen["exit_code"], "1")
 
-    def test_bare_main_is_rejected_even_if_the_prefix_is_empty(self):
-        self.setup_failure("c01", "main", prefix="", why="from a valid pinned branch")
-        self.setup_failure("c01", "main", prefix=None, why="from a valid pinned branch")
+    def test_bare_main_and_head_are_rejected_even_though_the_branches_exist(self):
+        self.setup_failure("c01", "main", why="from a valid pinned branch")
+        self.setup_failure("c01", "HEAD", why="from a valid pinned branch")
+        self.setup_failure("c01", "origin/main", why="from a valid pinned branch")
 
     def test_missing_branch_is_a_setup_failure(self):
         self.setup_failure("c01", "pin/not-there", why="from the pinned branch")
-
-    def test_unset_or_bad_prefix_rejects_every_ref(self):
-        for prefix in (None, "", "pin", "/", "pin/../", "../", "pin//", "a/b/", "-x/", "pin/ ", " pin/", "pin/\n",
-                       "p" * 31 + "/", "pi n/", "pin/*"):
-            self.setup_failure("c01", "pin/trial-1", prefix=prefix, why="from a valid pinned branch")
 
     def test_pinned_branch_missing_a_script_is_a_setup_failure(self):
         for only in ("scripts/public-runner.sh", "scripts/public-checks.sh"):
@@ -574,7 +591,7 @@ class PinnedBranch(Helpers, unittest.TestCase):
             sh(["git", "commit", "-q", "-m", "del"], cwd=work)
             sh(["git", "update-ref", "refs/remotes/origin/pin/gone", "HEAD"], cwd=work)
             sh(["git", "checkout", "-q", "main"], cwd=work)
-            r, out = self.run_script(d, work, "c01", extra={"PIN_REF": "pin/gone", "PIN_PREFIX": PREFIX})
+            r, out = self.run_script(d, work, "c01", extra={"PIN_REF": "pin/gone"})
             self.assert_setup_not_a_result(d, r, out)
 
     def test_symlinked_script_on_the_pinned_branch_is_a_setup_failure(self):
@@ -588,8 +605,8 @@ class PinnedBranch(Helpers, unittest.TestCase):
             self.assertEqual(seen["env.txt.who"].strip(), "pr-entry", ref)
             self.assertEqual(r.returncode, 0)
 
-    def test_pin_without_the_pin_variables_from_the_environment_uses_main(self):
-        _, _, r, out, seen, _ = self.run_pinned("c01", None, prefix=None)
+    def test_pin_without_the_pin_variable_from_the_environment_uses_main(self):
+        _, _, r, out, seen, _ = self.run_pinned("c01", None)
         self.assertEqual(seen["env.txt.who"].strip(), "main-entry")
 
 

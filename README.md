@@ -23,6 +23,11 @@ marker (`ci/<code>`) that the poller reads.
 - GitHub turns scheduled workflows off after 60 days without activity in a public
   repository. The poller therefore needs a keep-alive (a commit or a re-enable in the Actions
   tab at least every 50 days). Manual dispatch of the main workflow is the fallback.
-- Run pages show the commit sha, code and pull request number as inputs (accepted, see
-  `SECURITY.md` rule 7). `SECURITY.md` rule 6 says exactly what is and is not protected
-  from the code under test.
+- Run pages show the commit sha, code, pull request number and (trial only) the pin alias as
+  inputs, plus step names and the fixed words the scripts print (accepted, see `SECURITY.md`
+  rule 7, which lists what stays visible). `SECURITY.md` rule 6 says exactly what is and is not
+  protected from the code under test.
+- Trial-only pin (`SECURITY.md` rule 9): the optional input `pin` is a short alias such as `t1`
+  that means nothing by itself. It is looked up in the repository secret `PIN_MAP` (one line of
+  JSON, alias to branch name, set in the `private-code` environment); the branch it points to is
+  masked in the log. Leave `pin` empty for normal runs.
