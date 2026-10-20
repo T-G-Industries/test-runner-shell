@@ -21,13 +21,6 @@ on:
         type: string
         required: false
         default: ""
-      # TRIAL-ONLY (SECURITY.md rule 9): check codes only. A short meaningless alias (letters
-      # and digits) that the validate step looks up in a secret map. This value is public.
-      pin:
-        description: "Trial only: alias (a-z, 0-9, up to 20). Empty = default"
-        type: string
-        required: false
-        default: ""
 
 permissions:
   contents: read
@@ -60,40 +53,11 @@ jobs:
         env:
           PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
           PRIVATE_TOKEN: ${{ secrets.PRIVATE_TOKEN }}
-          PIN: ${{ inputs.pin }}
-          PIN_MAP: ${{ secrets.PIN_MAP }}
         run: |
-          [ -z "$PIN_MAP" ] || echo "::add-mask::${PIN_MAP%%$'\n'*}"
           [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be 40 hex characters"; exit 1; }
           [[ $SUITE_CODE =~ ^[sc][0-9]{2}$ ]] || { echo "::error::bad suite code"; exit 1; }
           [[ -z $PR || $PR =~ ^[0-9]{1,6}$ ]] || { echo "::error::bad pr number"; exit 1; }
           [ -n "$PRIVATE_REPO" ] && [ -n "$PRIVATE_TOKEN" ] || { echo "::error::secrets missing"; exit 1; }
-          # Trial-only pin (SECURITY.md rule 9): check codes only. The alias is public and means
-          # nothing; the branch it stands for lives only in the secret PIN_MAP (one-line JSON,
-          # alias -> branch name). The branch is masked the moment it is known, before any check
-          # on it, and leaves this step only through the step output file (with a flag "asked", so
-          # that a lost name fails the run instead of falling back to main). It is never echoed.
-          # The runner script applies the name rule again.
-          if [ -n "$PIN" ]; then
-            [[ $SUITE_CODE =~ ^c[0-9]{2}$ ]] || { echo "::error::pin is for check codes only"; exit 1; }
-            [[ $PIN =~ ^[a-z0-9]{1,20}$ ]] || { echo "::error::bad pin alias"; exit 1; }
-            branch=$(python3 -I -c 'import json, os, re, sys
-          try:
-              v = json.loads(os.environ["PIN_MAP"])[os.environ["PIN"]]
-          except Exception:
-              sys.exit(1)
-          if not isinstance(v, str) or not re.fullmatch(r"[\x21-\x7e]{1,200}", v) or "%" in v:
-              sys.exit(1)
-          sys.stdout.write(v)' 2>/dev/null) || { echo "::error::pin not available"; exit 1; }
-            echo "::add-mask::$branch"
-            prefix=${branch%%/*}
-            if [[ $branch == */* && ${#prefix} -ge 3 ]]; then echo "::add-mask::$prefix"; fi
-            [[ $branch =~ ^[A-Za-z0-9_][A-Za-z0-9._/-]{0,127}$ \
-               && $branch != */ && $branch != *..* && $branch != *//* && $branch != *'@{'* \
-               && $branch != main && $branch != HEAD && $branch != refs/* && $branch != origin/* ]] \
-              || { echo "::error::bad pin target"; exit 1; }
-            printf 'asked=1\nbranch=%s\n' "$branch" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Check out this repository (scripts only)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -143,9 +107,6 @@ jobs:
       - name: Run the check (output withheld)
         id: run_check
         if: ${{ startsWith(inputs.suite_code, 'c') }}
-        env:
-          PIN_ASKED: ${{ steps.validate.outputs.asked }}
-          PIN_REF: ${{ steps.validate.outputs.branch }}
         run: bash /opt/trs/scripts/run-private.sh "$WORK" "$SUITE_CODE"
 
       - name: Report (fixed words and numbers only)

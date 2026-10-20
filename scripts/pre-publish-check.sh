@@ -42,22 +42,14 @@ bad=""
 grep -qF "startsWith(inputs.suite_code, 'c')" .github/workflows/live-suite.yml || bad="$bad live-suite.yml lacks the check-code step condition;"
 grep -qF "steps.validate.outcome == 'success'" .github/workflows/live-suite.yml || bad="$bad the report step is not gated on validate;"
 grep -qF "/opt/trs/scripts/" .github/workflows/live-suite.yml || bad="$bad live-suite.yml does not use the locked script copy;"
-for v in PRIVATE_TOKEN PRIVATE_REPO RELEASE_TOKEN GITHUB_TOKEN RUNNER_TEMP RUNNER_WORKSPACE GITHUB_WORKSPACE GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT PIN_REF PIN_ASKED; do
+for v in PRIVATE_TOKEN PRIVATE_REPO RELEASE_TOKEN GITHUB_TOKEN RUNNER_TEMP RUNNER_WORKSPACE GITHUB_WORKSPACE GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT; do
   grep -qE -- "-u $v([[:space:]]|\\\\|$)" scripts/run-private.sh || bad="$bad run-private.sh does not unset $v;"
 done
 ru=$(grep -nE -- "-u RUNNER_TEMP([[:space:]]|\\\\|$)" scripts/run-private.sh | head -1 | cut -d: -f1)
 rs=$(grep -nF 'RUNNER_TEMP="$ptmp"' scripts/run-private.sh | head -1 | cut -d: -f1)
 { [ -n "$ru" ] && [ -n "$rs" ] && [ "$ru" -le "$rs" ]; } || bad="$bad run-private.sh must unset RUNNER_TEMP and then re-export a private one after it;"
 grep -qF "origin/main" scripts/run-private.sh || bad="$bad run-private.sh does not pin the entry scripts;"
-grep -qF "refs/remotes/origin/\$PIN_REF" scripts/run-private.sh || bad="$bad run-private.sh lacks the pinned-branch lookup;"
-wf=.github/workflows/live-suite.yml
-grep -qF 'PIN_REF: ${{ steps.validate.outputs.branch }}' $wf || bad="$bad live-suite.yml does not pass the resolved pin through a step output;"
-grep -qF 'PIN_MAP: ${{ secrets.PIN_MAP }}' $wf || bad="$bad live-suite.yml does not read the pin map from a secret;"
-grep -qF '::add-mask::$branch' $wf || bad="$bad live-suite.yml does not mask the resolved pin;"
-n=$(grep -c 'secrets\.PIN_MAP' $wf); [ "$n" = 1 ] || bad="$bad the pin map secret is referenced $n times (need exactly 1);"
-grep -nE 'inputs\.pin_ref|PIN_PREFIX|vars\.' -r .github scripts --exclude=pre-publish-check.sh | grep -vE '^[^:]+:[0-9]+:\s*#' >/dev/null && bad="$bad the old pin_ref input, PIN_PREFIX or a repository variable is still used;"
-grep -nE 'inputs\.pin\b' $wf | grep -vE '^[0-9]+:\s+PIN: \$\{\{ inputs\.pin \}\}\s*$' >/dev/null && bad="$bad the pin alias is used somewhere other than one env line;"
-grep -nE 'steps\.validate\.outputs' $wf | grep -vE '^[0-9]+:\s+PIN_(ASKED|REF): \$\{\{ steps\.validate\.outputs\.(asked|branch) \}\}\s*$' >/dev/null && bad="$bad a step output of validate is used somewhere other than the two env lines;"
+grep -nE 'inputs\.pin|PIN_|vars\.' -r .github scripts --exclude=pre-publish-check.sh | grep -vE '^[^:]+:[0-9]+:\s*#' >/dev/null && bad="$bad a pin input, a PIN_ variable or a repository variable is still used;"
 [ -z "$bad" ] && echo ok || { echo "FAIL: $bad"; fail=1; }
 for t in tests/test_*.py; do python3 -B -I "$t" >/dev/null 2>&1 && echo "ok $t" || { echo "FAIL $t"; fail=1; }; done
 echo "6. gitleaks"

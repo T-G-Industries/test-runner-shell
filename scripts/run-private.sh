@@ -15,29 +15,12 @@
 #    If origin/main does not have both files (the private side is not on main yet), nothing
 #    runs and the result is a setup failure (NOT A RESULT), never a pass. Other files the
 #    entry script reads from the checkout are still the commit's own.
-#  - TRIAL-ONLY switch (remove once the private main branch carries both scripts, SECURITY.md
-#    rule 9): if PIN_REF is set, a check code takes those two files from the remote-tracking
-#    branch origin/$PIN_REF instead of origin/main. The workflow's validate step resolves a
-#    public alias to the name through a secret map and passes it on through a masked step
-#    output, so this script never sees the alias or the map. PIN_REF must be a plain branch
-#    name (not main, HEAD, refs/..., origin/...); anything else, or a branch that is missing or
-#    lacks a file, is a setup failure (NOT A RESULT), never a fall back to main. The name is
-#    never printed. PIN_ASKED is a plain flag the workflow sets whenever an alias was given; with
-#    it set and PIN_REF empty (the name was lost on its way) the result is a setup failure, not
-#    a run with main's scripts. Suite codes never read PIN_REF or PIN_ASKED.
 # Suite codes (sNN) pass RELEASE_TOKEN for image loading and run the commit's entry script.
 set -uo pipefail
 work="$1"; code="$2"
 : "${OUT:?}"
 mkdir -p "$OUT"; rm -f "$OUT/result.json"
 pinned="scripts/public-runner.sh scripts/public-checks.sh"
-PIN_REF="${PIN_REF:-}"; PIN_ASKED="${PIN_ASKED:-}"
-
-pin_ref_ok() {  # 0 only for a plain branch name (same rule as the workflow's validate step)
-  [[ $PIN_REF =~ ^[A-Za-z0-9_][A-Za-z0-9._/-]{0,127}$ ]] || return 1
-  [[ $PIN_REF != */ && $PIN_REF != *..* && $PIN_REF != *//* && $PIN_REF != *'@{'* ]] || return 1
-  [[ $PIN_REF != main && $PIN_REF != HEAD && $PIN_REF != refs/* && $PIN_REF != origin/* ]] || return 1
-}
 
 pin_entry() {  # overwrite the pinned files with $1's (default origin/main); 0 only if they now match exactly
   local f src="${1:-origin/main}"
@@ -56,18 +39,7 @@ pin_entry() {  # overwrite the pinned files with $1's (default origin/main); 0 o
 case "$code" in
   c*)
     where="the main branch"
-    if [ -z "$PIN_REF" ] && [ -n "$PIN_ASKED" ]; then
-      where="a valid pinned branch"  # a pin was asked for but its name did not arrive: never main
-      ok=1
-    elif [ -z "$PIN_REF" ]; then
-      ( pin_entry origin/main ); ok=$?
-    elif pin_ref_ok; then
-      where="the pinned branch"
-      ( pin_entry "refs/remotes/origin/$PIN_REF" ); ok=$?
-    else
-      where="a valid pinned branch"
-      ok=1
-    fi
+    ( pin_entry origin/main ); ok=$?
     if [ "$ok" != 0 ]; then
       echo '{"passed":0,"failed":0,"skipped":0,"errors":0,"counted":false,"reason":"setup"}' > "$OUT/result.json"
       echo 1 > "$OUT/exit_code"
@@ -93,7 +65,7 @@ case "$code" in
         -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_STEP_SUMMARY \
         -u RUNNER_TEMP -u RUNNER_WORKSPACE -u GITHUB_WORKSPACE \
         -u ACTIONS_RUNTIME_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL \
-        -u ACTIONS_CACHE_URL -u ACTIONS_RESULTS_URL -u PIN_REF -u PIN_ASKED \
+        -u ACTIONS_CACHE_URL -u ACTIONS_RESULTS_URL \
         RUNNER_TEMP="$ptmp" RESULT_JSON="$OUT/result.json" bash scripts/public-runner.sh "$code" ) >"$OUT/run.log" 2>&1
     rc=$?
     rm -rf -- "$ptmp"; ptmp=""
