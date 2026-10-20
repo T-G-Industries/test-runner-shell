@@ -21,6 +21,13 @@ on:
         type: string
         required: false
         default: ""
+      # TRIAL-ONLY (SECURITY.md rule 9): check codes only. A private branch (the configured
+      # prefix plus a plain name) to take the two entry scripts from instead of main.
+      pin_ref:
+        description: "Trial only: branch to take the entry scripts from (check codes). Empty = main"
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -53,11 +60,23 @@ jobs:
         env:
           PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
           PRIVATE_TOKEN: ${{ secrets.PRIVATE_TOKEN }}
+          PIN_REF: ${{ inputs.pin_ref }}
+          PIN_PREFIX: ${{ vars.PIN_PREFIX }}
         run: |
           [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be 40 hex characters"; exit 1; }
           [[ $SUITE_CODE =~ ^[sc][0-9]{2}$ ]] || { echo "::error::bad suite code"; exit 1; }
           [[ -z $PR || $PR =~ ^[0-9]{1,6}$ ]] || { echo "::error::bad pr number"; exit 1; }
           [ -n "$PRIVATE_REPO" ] && [ -n "$PRIVATE_TOKEN" ] || { echo "::error::secrets missing"; exit 1; }
+          # Trial-only pin: check codes only, the configured prefix plus a plain branch name.
+          # The runner script applies the same rule again. The value is never echoed.
+          if [ -n "$PIN_REF" ]; then
+            [[ $SUITE_CODE =~ ^c[0-9]{2}$ ]] || { echo "::error::pin_ref is for check codes only"; exit 1; }
+            [[ $PIN_PREFIX =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{0,29}/$ ]] || { echo "::error::pin prefix not configured"; exit 1; }
+            rest=${PIN_REF#"$PIN_PREFIX"}
+            [[ $PIN_REF == "$PIN_PREFIX"?* && $rest =~ ^[A-Za-z0-9._/-]{1,100}$ \
+               && $rest != /* && $rest != */ && $rest != *..* && $rest != *//* && $rest != *'@{'* ]] \
+              || { echo "::error::bad pin_ref"; exit 1; }
+          fi
 
       - name: Check out this repository (scripts only)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -107,6 +126,9 @@ jobs:
       - name: Run the check (output withheld)
         id: run_check
         if: ${{ startsWith(inputs.suite_code, 'c') }}
+        env:
+          PIN_REF: ${{ inputs.pin_ref }}
+          PIN_PREFIX: ${{ vars.PIN_PREFIX }}
         run: bash /opt/trs/scripts/run-private.sh "$WORK" "$SUITE_CODE"
 
       - name: Report (fixed words and numbers only)

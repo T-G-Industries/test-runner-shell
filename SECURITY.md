@@ -45,10 +45,12 @@
    scope (rule 8). Treat the token as exposed to anyone who can push a branch there. A
    compromised run can forge any status the token may write.
 7. What is visible in the public repository: the sha, the suite code and the pull request
-   number are `workflow_dispatch` inputs, so they are shown on each run's page, and the
+   number (and, in the trial of rule 9, the `pin_ref` branch name) are `workflow_dispatch`
+   inputs, so they are shown on each run's page, and the
    run list shows when runs happen. This is accepted: a sha gives no content, and the
    cadence of runs is visible from timing anyway. Nothing else about the
-   private repository is shown (not its name, branch names, titles, file or test names).
+   private repository is shown (not its name, branch names, titles, file or test names),
+   except a branch name given as `pin_ref` during the trial of rule 9.
 8. Operation requirements (neither is checked by code):
    - The `private-code` environment must have no required reviewers and no wait timer.
      Otherwise every poller run and every dispatched run waits for an approval that nobody
@@ -61,3 +63,34 @@
    - `PRIVATE_TOKEN`: fine-grained, private repository only; Contents read, Commit
      statuses write, Pull requests/Issues write (comments). Nothing else. It expires; a
      reminder is needed before then.
+9. TRIAL-ONLY switch, to be removed once the private main branch carries
+   `scripts/public-runner.sh` and `scripts/public-checks.sh` (delete the `pin_ref` input, the
+   `PIN_REF`/`PIN_PREFIX` env on the validate and check steps, the pin code in
+   `scripts/run-private.sh`, and the tests marked trial-only; then close this rule).
+   - What it does: `live-suite.yml` has an optional input `pin_ref` (default empty, which
+     changes nothing). For a check code (`cNN`) only, a non-empty value makes
+     `run-private.sh` take the two entry scripts from the remote-tracking branch
+     `origin/<pin_ref>` of the fetched checkout instead of `origin/main`, with the same
+     checks as for main (both files exist as regular files on that branch, none is a
+     symlink, and the copies on disk are byte-identical to the branch's).
+   - Limits, checked twice (the validate step and `run-private.sh`): the value must be the
+     prefix held in the repository variable `PIN_PREFIX` (a single word and a slash; the
+     word is not written in this repository) followed by 1 to 100 characters from
+     `A-Z a-z 0-9 . _ / -`, with no `..`, no `//`, no leading or trailing `/` after the prefix and
+     no `@{`. So no `main`, no `refs/...`, no spaces, no other prefix. If the variable is unset
+     or malformed every pin is rejected. The validate step also rejects a pin for a suite
+     code (`sNN`); `run-private.sh` never reads it for one.
+   - Failure is never a fall back: an invalid value, a missing branch, or a branch that lacks
+     a file gives NOT A RESULT (setup). Nothing from the commit under test or from main runs.
+   - The value reaches the scripts only through `env:` on the validate and check steps (never
+     inline in a script, never at job level, never in the concurrency group or run name), and
+     `run-private.sh` unsets `PIN_REF` and `PIN_PREFIX` before the code under test starts.
+     No script prints it (the setup message says "the pinned branch"). It is still visible
+     as an input on the run's page and in the step headers of those two steps, like the sha.
+   - Exposure: whoever can dispatch `live-suite.yml` (write access to this repository) can
+     make a run execute the entry scripts of any branch that matches the prefix in the
+     private repository. That is the same trust as dispatching an arbitrary sha, since the
+     commit under test is already arbitrary code; the pin changes which scripts judge it, so
+     a pinned run is only as trustworthy as that branch. Anyone who can push such a branch
+     there can also supply the scripts, which is why the prefix is a configured variable.
+     Do not use a pin for a result you rely on to merge.

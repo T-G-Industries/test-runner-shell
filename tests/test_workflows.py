@@ -4,7 +4,7 @@ These read the YAML, they do not run it: they fix the properties SECURITY.md pro
 where secrets appear, which step may run code from the fetched commit, and what the final
 report depends on. A real run on GitHub is the only runtime proof.
 """
-import glob, os, re, sys, unittest
+import glob, os, re, subprocess, unittest
 
 import yaml  # a missing module is a failure here, never a skip
 
@@ -135,6 +135,89 @@ class Live(unittest.TestCase):
     def test_no_forbidden_constructs(self):
         for bad in ("upload-artifact", "actions/cache", "set -x", "bash -x", "ACTIONS_STEP_DEBUG"):
             self.assertNotIn(bad, self.text)
+
+    # TRIAL-ONLY pin switch (SECURITY.md rule 9): check codes may take their entry scripts
+    # from a named private branch. Remove these tests together with the switch.
+    def test_pin_ref_is_an_optional_string_input_defaulting_to_empty(self):
+        on = self.doc.get("on", self.doc.get(True))
+        spec = on["workflow_dispatch"]["inputs"]["pin_ref"]
+        self.assertEqual((spec["type"], spec["required"], spec["default"]), ("string", False, ""))
+
+    def test_pin_values_are_only_ever_passed_through_env_on_two_steps(self):
+        for pat in (r"inputs\.pin_ref", r"vars\.PIN_PREFIX"):
+            for line in self.text.splitlines():
+                if re.search(pat, line):
+                    self.assertRegex(line, r"^\s+PIN_(REF|PREFIX): \$\{\{ (inputs\.pin_ref|vars\.PIN_PREFIX) \}\}\s*$")
+        holders = [s["id"] for s in self.steps if "PIN_REF" in str(s.get("env", {}))]
+        self.assertEqual(holders, ["validate", "run_check"])
+        holders = [s["id"] for s in self.steps if "PIN_PREFIX" in str(s.get("env", {}))]
+        self.assertEqual(holders, ["validate", "run_check"])
+        self.assertNotIn("PIN_", str(self.job.get("env", "")))
+        self.assertNotIn("PIN_", str(self.doc.get("env", "")))
+        self.assertNotIn("pin_ref", self.doc["concurrency"]["group"])
+        self.assertNotIn("pin_ref", self.doc["run-name"])
+        for s in self.steps:
+            self.assertNotIn("pin_ref", s.get("if", ""))
+            if s.get("id") != "validate":
+                self.assertNotIn("pin_ref", s.get("run", ""))
+            self.assertNotIn("pin_ref", str(s.get("with", {})))
+
+    def test_the_suite_step_gets_no_pin_value(self):
+        for sid in ("run_suite", "fetch", "pending", "report"):
+            self.assertNotIn("PIN_", str(by_id(self.steps, sid)))
+
+    def test_check_step_still_has_no_secret_with_the_pin_env(self):
+        s = by_id(self.steps, "run_check")
+        self.assertFalse(has_secret(s))
+        self.assertEqual(s["env"], {"PIN_REF": "${{ inputs.pin_ref }}", "PIN_PREFIX": "${{ vars.PIN_PREFIX }}"})
+
+    def validate(self, ref, prefix="pin/", code="c01", **env):
+        e = {"PATH": os.environ["PATH"], "SHA": "a" * 40, "SUITE_CODE": code, "PR": "",
+             "PRIVATE_REPO": "owner-x/repo-y", "PRIVATE_TOKEN": "tok-synthetic-value"}
+        if ref is not None:
+            e["PIN_REF"] = ref
+        if prefix is not None:
+            e["PIN_PREFIX"] = prefix
+        e.update(env)
+        return subprocess.run(["bash", "-eo", "pipefail", "-c", self.steps[0]["run"]], env=e,
+                              capture_output=True, text=True)
+
+    def test_validate_step_default_is_unchanged(self):
+        for ref, prefix in ((None, None), ("", None), ("", ""), ("", "pin/"), (None, "pin/")):
+            for code in ("c01", "c06", "s01", "s99"):
+                r = self.validate(ref, prefix, code)
+                self.assertEqual(r.returncode, 0, (ref, prefix, code, r.stdout + r.stderr))
+
+    def test_validate_step_accepts_a_plain_branch_for_check_codes_only(self):
+        for ref in ("pin/trial-1", "pin/a.b_c-d", "pin/feature/x", "pin/" + "a" * 100):
+            for code in ("c01", "c02", "c03", "c04", "c05", "c06"):
+                self.assertEqual(self.validate(ref, code=code).returncode, 0, (ref, code))
+            for code in ("s01", "s05"):
+                r = self.validate(ref, code=code)
+                self.assertNotEqual(r.returncode, 0, (ref, code))
+                self.assertNotIn(ref, r.stdout + r.stderr)
+
+    def test_validate_step_rejects_everything_else_without_echoing_it(self):
+        bad = ["pin/../main", "pin/a/../b", "pin/a..b", "pin/a b", "pin/a\tb", "pin/a\nb", "main", "origin/main",
+               "refs/heads/pin/x", "refs/remotes/origin/pin/x", "other/x", "Pin/x", "pin", "pin/", "/pin/x",
+               "pin/x/", "pin//x", "pin/a//b", "pin/x@{1}", "pin/x;true", "pin/$(true)", "pin/x*", "pin/x~1", "pin/x^",
+               "pin/x:y", "pin/x\\y", "pin/" + "a" * 101, "origin/pin/x", "../pin/x", "pin/\u00e9"]
+        for ref in bad:
+            r = self.validate(ref)
+            self.assertNotEqual(r.returncode, 0, ref)
+            if ref not in ("pin", "pin/"):
+                self.assertNotIn(ref, r.stdout + r.stderr)
+
+    def test_validate_step_rejects_a_pin_when_the_prefix_is_unset_or_odd(self):
+        for prefix in (None, "", "pin", "/", "../", "pin/../", "pin//", "a/b/", "-x/", "pin/ ", "p" * 31 + "/", "pin/*"):
+            self.assertNotEqual(self.validate("pin/trial-1", prefix).returncode, 0, prefix)
+            self.assertNotEqual(self.validate("main", prefix).returncode, 0, prefix)
+
+    def test_validate_step_still_rejects_the_old_bad_inputs(self):
+        self.assertNotEqual(self.validate("", SHA="g" * 40).returncode, 0)
+        self.assertNotEqual(self.validate("", SUITE_CODE="x01").returncode, 0)
+        self.assertNotEqual(self.validate("", PR="12x").returncode, 0)
+        self.assertNotEqual(self.validate("", PRIVATE_TOKEN="").returncode, 0)
 
 
 class Poll(unittest.TestCase):

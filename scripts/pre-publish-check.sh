@@ -42,10 +42,13 @@ bad=""
 grep -qF "startsWith(inputs.suite_code, 'c')" .github/workflows/live-suite.yml || bad="$bad live-suite.yml lacks the check-code step condition;"
 grep -qF "steps.validate.outcome == 'success'" .github/workflows/live-suite.yml || bad="$bad the report step is not gated on validate;"
 grep -qF "/opt/trs/scripts/" .github/workflows/live-suite.yml || bad="$bad live-suite.yml does not use the locked script copy;"
-for v in PRIVATE_TOKEN PRIVATE_REPO RELEASE_TOKEN GITHUB_TOKEN RUNNER_TEMP RUNNER_WORKSPACE GITHUB_WORKSPACE GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT; do
+for v in PRIVATE_TOKEN PRIVATE_REPO RELEASE_TOKEN GITHUB_TOKEN RUNNER_TEMP RUNNER_WORKSPACE GITHUB_WORKSPACE GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT PIN_REF PIN_PREFIX; do
   grep -qE -- "-u $v([[:space:]]|\\\\|$)" scripts/run-private.sh || bad="$bad run-private.sh does not unset $v;"
 done
 grep -qF "origin/main" scripts/run-private.sh || bad="$bad run-private.sh does not pin the entry scripts;"
+grep -qF "refs/remotes/origin/\$PIN_REF" scripts/run-private.sh || bad="$bad run-private.sh lacks the pinned-branch lookup;"
+grep -qF 'PIN_REF: ${{ inputs.pin_ref }}' .github/workflows/live-suite.yml || bad="$bad live-suite.yml does not pass pin_ref through env;"
+grep -nE 'inputs\.pin_ref' .github/workflows/live-suite.yml | grep -vE '^[0-9]+:\s+PIN_REF: \$\{\{ inputs\.pin_ref \}\}\s*$' >/dev/null && bad="$bad pin_ref is used somewhere other than an env line;"
 [ -z "$bad" ] && echo ok || { echo "FAIL: $bad"; fail=1; }
 for t in tests/test_*.py; do python3 -B -I "$t" >/dev/null 2>&1 && echo "ok $t" || { echo "FAIL $t"; fail=1; }; done
 echo "6. gitleaks"

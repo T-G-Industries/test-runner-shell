@@ -90,10 +90,12 @@ class Fetch(unittest.TestCase):
             self.assertNotIn(TOKEN, r.stdout + r.stderr)
 
 
-def make_work(d, pr_files, main_files=None):
+def make_work(d, pr_files, main_files=None, extra_refs=None):
     """A checkout of 'the commit under test' (pr_files) whose origin/main has main_files.
 
-    Files are {relative path: text}. main_files None means there is no origin/main at all.
+    Files are {relative path: text}; a value ("link", target) makes a symlink. main_files None
+    means there is no origin/main at all. extra_refs is {branch name: files}: more
+    remote-tracking branches (refs/remotes/origin/<name>), each one commit on top of origin/main.
     """
     work = os.path.join(d, "w")
     sh(["git", "init", "-q", "-b", "main", work])
@@ -104,6 +106,9 @@ def make_work(d, pr_files, main_files=None):
             os.makedirs(os.path.dirname(path), exist_ok=True)
             if os.path.lexists(path):
                 os.remove(path)
+            if isinstance(text, tuple):
+                os.symlink(text[1], path)
+                continue
             with open(path, "w") as f:
                 f.write(text)
         sh(["git", "add", "-A"], cwd=work)
@@ -113,6 +118,11 @@ def make_work(d, pr_files, main_files=None):
     if main_files is not None:
         base = commit(main_files, "main")
         sh(["git", "update-ref", "refs/remotes/origin/main", base], cwd=work)
+        for name, files in (extra_refs or {}).items():
+            sh(["git", "checkout", "-q", "--detach", base], cwd=work)
+            tip = commit(files, "pin")
+            sh(["git", "update-ref", "refs/remotes/origin/" + name, tip], cwd=work)
+            sh(["git", "checkout", "-q", "main"], cwd=work)
     commit(pr_files, "pr")
     return work
 
@@ -128,7 +138,7 @@ SECRET_ENV = ("RELEASE_TOKEN", "PRIVATE_TOKEN", "PRIVATE_REPO", "GITHUB_ENV", "G
               "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_CACHE_URL", "ACTIONS_RESULTS_URL")
 
 
-class Run(unittest.TestCase):
+class Helpers:
     def run_script(self, d, work, code, extra=None, drop_token=False):
         out = os.path.join(d, "out")
         env = {"PRIVATE_TOKEN": TOKEN, "PRIVATE_REPO": "owner-x/repo-y", "OUT": out,
@@ -147,6 +157,22 @@ class Run(unittest.TestCase):
         with open(os.path.join(d, name)) as f:
             return f.read()
 
+    def assert_setup_not_a_result(self, d, r, out):
+        self.assertEqual(r.returncode, 0)
+        self.assertNotEqual(self.read(d, "out/exit_code").strip(), "0")
+        self.assertFalse(os.path.exists(os.path.join(d, "env.txt.who")), "no entry script may run")
+        status = os.path.join(d, "status.json")
+        r2 = subprocess.run([sys.executable, "-I", os.path.join(SCRIPTS, "sanitize.py"),
+                             os.path.join(out, "result.json"), os.path.join(out, "exit_code"), status],
+                            capture_output=True, text=True)
+        self.assertEqual(r2.returncode, 0)
+        with open(status) as f:
+            st = json.load(f)
+        self.assertEqual((st["state"], st["description"]), ("error", "NOT A RESULT (setup)"))
+        self.assertNotIn(TOKEN, r.stdout + r.stderr)
+
+
+class Run(Helpers, unittest.TestCase):
     def run_entry(self, code):
         with tempfile.TemporaryDirectory() as d:
             work = make_work(d, MAIN, MAIN)
@@ -251,20 +277,6 @@ class Run(unittest.TestCase):
             with open(target) as f:
                 self.assertEqual(f.read(), EVIL_ENTRY)
 
-    def assert_setup_not_a_result(self, d, r, out):
-        self.assertEqual(r.returncode, 0)
-        self.assertNotEqual(self.read(d, "out/exit_code").strip(), "0")
-        self.assertFalse(os.path.exists(os.path.join(d, "env.txt.who")), "no entry script may run")
-        status = os.path.join(d, "status.json")
-        r2 = subprocess.run([sys.executable, "-I", os.path.join(SCRIPTS, "sanitize.py"),
-                             os.path.join(out, "result.json"), os.path.join(out, "exit_code"), status],
-                            capture_output=True, text=True)
-        self.assertEqual(r2.returncode, 0)
-        with open(status) as f:
-            st = json.load(f)
-        self.assertEqual((st["state"], st["description"]), ("error", "NOT A RESULT (setup)"))
-        self.assertNotIn(TOKEN, r.stdout + r.stderr)
-
     def test_origin_main_without_the_scripts_is_a_setup_failure(self):
         with tempfile.TemporaryDirectory() as d:
             # The commit under test has working-looking scripts; origin/main has none yet.
@@ -311,6 +323,159 @@ class Run(unittest.TestCase):
             work = make_work(d, {"scripts/public-runner.sh": EVIL_ENTRY}, {"README": "x"})
             self.run_script(d, work, "s05")
             self.assertEqual(self.read(d, "env.txt.who").strip(), "pr-entry")
+
+
+PREFIX = "pin/"  # stands in for the repository variable that holds the allowed branch prefix
+PIN_ENTRY = ('#!/usr/bin/env bash\necho pinned-entry > "$ENVDUMP.who"\ncp scripts/public-checks.sh "$ENVDUMP.checks"\n'
+             'env | sort > "$ENVDUMP"\necho "$1" > "$ENVDUMP.code"\necho \'{}\' > "$RESULT_JSON"\n')
+PIN_CHECKS = "# checks from the pinned branch\n"
+PIN = {"scripts/public-runner.sh": PIN_ENTRY, "scripts/public-checks.sh": PIN_CHECKS}
+BAD_REFS = ["pin/../main", "pin/a/../b", "pin/a..b", "pin/a b", "pin/a\tb", "pin/a\nb", "main", "origin/main",
+            "refs/heads/pin/x", "refs/remotes/origin/pin/x", "other/x", "Pin/x", "pin", "pin/", "/pin/x",
+            "pin/x/", "pin//x", "pin/a//b", "pin/x//", "pin/x@{1}", "pin/x@{u}", "pin/x;true", "pin/$(true)", "pin/x*",
+            "pin/x?", "pin/x~1", "pin/x^", "pin/x:y", "pin/x\\y", "pin/" + "a" * 101, "origin/pin/x", "../pin/x",
+            "pin/\u00e9"]
+
+
+class PinnedBranch(Helpers, unittest.TestCase):
+    """TRIAL-ONLY: check codes may take their entry scripts from a named private branch."""
+
+    def run_pinned(self, code, ref, extra_env=None, refs=None, pr=None, main=MAIN, prefix=PREFIX):
+        with tempfile.TemporaryDirectory() as d:
+            work = make_work(d, pr or {"scripts/public-runner.sh": EVIL_ENTRY, "scripts/public-checks.sh": "x"},
+                             main, refs if refs is not None else {"pin/trial-1": PIN})
+            env = {} if ref is None else {"PIN_REF": ref}
+            if prefix is not None:
+                env["PIN_PREFIX"] = prefix
+            env.update(extra_env or {})
+            r, out = self.run_script(d, work, code, extra=env)
+            seen = {n: self.read(d, n) if os.path.exists(os.path.join(d, n)) else None
+                    for n in ("env.txt", "env.txt.who", "env.txt.checks", "env.txt.code")}
+            seen["exit_code"] = self.read(d, "out/exit_code").strip()
+            runner = os.path.join(work, "scripts", "public-runner.sh")
+            seen["runner"] = self.read(work, "scripts/public-runner.sh") if os.path.exists(runner) else None
+            logs = r.stdout + r.stderr + self.read(d, "out/run.log") + self.read(d, "out/exit_code")
+            if os.path.exists(os.path.join(out, "result.json")):
+                logs += self.read(d, "out/result.json")
+            return d, work, r, out, seen, logs
+
+    def setup_failure(self, code, ref, **kw):
+        with tempfile.TemporaryDirectory() as d:
+            work = make_work(d, {"scripts/public-runner.sh": EVIL_ENTRY, "scripts/public-checks.sh": "x"},
+                             kw.get("main", MAIN), kw.get("refs", {"pin/trial-1": PIN}))
+            env = {} if ref is None else {"PIN_REF": ref}
+            if kw.get("prefix", PREFIX) is not None:
+                env["PIN_PREFIX"] = kw.get("prefix", PREFIX)
+            r, out = self.run_script(d, work, code, extra=env)
+            self.assert_setup_not_a_result(d, r, out)
+            logs = r.stdout + r.stderr + self.read(d, "out/run.log")
+            if ref and ref not in ("pin", "pin/"):  # those are substrings of the fixed words
+                self.assertNotIn(ref, logs)
+            self.assertFalse(os.path.exists(os.path.join(d, "env.txt.checks")))
+            if kw.get("why"):  # which check stopped it: the ref itself, or the branch lookup
+                self.assertIn(kw["why"], logs)
+
+    def test_default_without_a_pin_is_unchanged(self):
+        for ref in (None, ""):
+            _, _, r, out, seen, _ = self.run_pinned("c02", ref)
+            self.assertEqual(seen["env.txt.who"].strip(), "main-entry", ref)
+            self.assertEqual(seen["env.txt.checks"], GOOD_CHECKS)
+
+    def test_empty_pin_with_no_prefix_configured_is_unchanged(self):
+        _, _, r, out, seen, _ = self.run_pinned("c02", "", prefix=None)
+        self.assertEqual(seen["env.txt.who"].strip(), "main-entry")
+        _, _, r, out, seen, _ = self.run_pinned("c02", None, prefix="")
+        self.assertEqual(seen["env.txt.who"].strip(), "main-entry")
+
+    def test_valid_pin_runs_the_pinned_branch_scripts(self):
+        _, _, r, out, seen, _ = self.run_pinned("c03", "pin/trial-1")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(seen["env.txt.who"].strip(), "pinned-entry")
+        self.assertEqual(seen["env.txt.checks"], PIN_CHECKS)
+        self.assertEqual(seen["env.txt.code"].strip(), "c03")
+
+    def test_every_check_code_honours_the_pin(self):
+        for code in ("c01", "c02", "c03", "c04", "c05", "c06"):
+            _, _, r, out, seen, _ = self.run_pinned(code, "pin/trial-1")
+            self.assertEqual(seen["env.txt.who"].strip(), "pinned-entry", code)
+
+    def test_pin_names_with_dots_dashes_slashes_are_accepted(self):
+        for name in ("pin/a.b-c_d", "pin/feature/x-1.2", "pin/" + "a" * 100):
+            _, _, r, out, seen, _ = self.run_pinned("c01", name, refs={name: PIN})
+            self.assertEqual(seen["env.txt.who"].strip(), "pinned-entry", name)
+
+    def test_pin_does_not_fall_back_to_main_or_the_commit(self):
+        # main has different scripts and the commit has evil ones; only the pinned ones may run.
+        _, work, r, out, seen, _ = self.run_pinned("c01", "pin/trial-1")
+        self.assertEqual(seen["env.txt.who"].strip(), "pinned-entry")
+        self.assertEqual(seen["runner"], PIN_ENTRY)
+
+    def test_pinned_entry_gets_no_token_and_no_pin_variables(self):
+        _, _, r, out, seen, logs = self.run_pinned("c01", "pin/trial-1")
+        dumped = seen["env.txt"]
+        self.assertNotIn(TOKEN, dumped)
+        for name in SECRET_ENV + ("PIN_REF", "PIN_PREFIX"):
+            self.assertFalse(("\n" + name + "=") in ("\n" + dumped), name)
+
+    def test_ref_is_never_printed(self):
+        _, _, r, out, seen, logs = self.run_pinned("c01", "pin/trial-1")
+        self.assertNotIn("trial-1", logs)
+        self.assertEqual(r.returncode, 0)
+        self.setup_failure("c01", "pin/missing-branch")
+        self.setup_failure("c01", "pin/../main")
+
+    def test_invalid_refs_are_rejected_as_setup_failures(self):
+        for ref in BAD_REFS:
+            # make the dangerous branches exist where git allows, so only the check can stop them
+            self.setup_failure("c01", ref, refs={"pin/trial-1": PIN}, why="from a valid pinned branch")
+
+    def test_invalid_ref_never_falls_back_to_main(self):
+        d, work, r, out, seen, _ = self.run_pinned("c05", "main")
+        self.assertIsNone(seen["env.txt.who"])
+        self.assertEqual(seen["exit_code"], "1")
+
+    def test_bare_main_is_rejected_even_if_the_prefix_is_empty(self):
+        self.setup_failure("c01", "main", prefix="", why="from a valid pinned branch")
+        self.setup_failure("c01", "main", prefix=None, why="from a valid pinned branch")
+
+    def test_missing_branch_is_a_setup_failure(self):
+        self.setup_failure("c01", "pin/not-there", why="from the pinned branch")
+
+    def test_unset_or_bad_prefix_rejects_every_ref(self):
+        for prefix in (None, "", "pin", "/", "pin/../", "../", "pin//", "a/b/", "-x/", "pin/ ", " pin/", "pin/\n",
+                       "p" * 31 + "/", "pi n/", "pin/*"):
+            self.setup_failure("c01", "pin/trial-1", prefix=prefix, why="from a valid pinned branch")
+
+    def test_pinned_branch_missing_a_script_is_a_setup_failure(self):
+        for only in ("scripts/public-runner.sh", "scripts/public-checks.sh"):
+            self.setup_failure("c01", "pin/trial-1", refs={"pin/trial-1": {only: PIN[only]}},
+                               main={only: PIN[only]})
+
+    def test_pinned_branch_that_deleted_a_script_is_a_setup_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            work = make_work(d, MAIN, MAIN, {"pin/gone": {"other.txt": "x"}})
+            sh(["git", "checkout", "-q", "--detach", "refs/remotes/origin/pin/gone"], cwd=work)
+            sh(["git", "rm", "-q", "scripts/public-checks.sh"], cwd=work)
+            sh(["git", "commit", "-q", "-m", "del"], cwd=work)
+            sh(["git", "update-ref", "refs/remotes/origin/pin/gone", "HEAD"], cwd=work)
+            sh(["git", "checkout", "-q", "main"], cwd=work)
+            r, out = self.run_script(d, work, "c01", extra={"PIN_REF": "pin/gone", "PIN_PREFIX": PREFIX})
+            self.assert_setup_not_a_result(d, r, out)
+
+    def test_symlinked_script_on_the_pinned_branch_is_a_setup_failure(self):
+        evil = {"scripts/public-runner.sh": ("link", "/nonexistent/evil.sh"), "scripts/public-checks.sh": "x"}
+        self.setup_failure("c01", "pin/trial-1", refs={"pin/trial-1": evil})
+
+    def test_suite_codes_ignore_the_pin(self):
+        for ref in ("pin/trial-1", "pin/missing", "main", "pin/../x", ""):
+            _, _, r, out, seen, logs = self.run_pinned(
+                "s05", ref, pr={"scripts/public-runner.sh": EVIL_ENTRY}, main={"README": "x"})
+            self.assertEqual(seen["env.txt.who"].strip(), "pr-entry", ref)
+            self.assertEqual(r.returncode, 0)
+
+    def test_pin_without_the_pin_variables_from_the_environment_uses_main(self):
+        _, _, r, out, seen, _ = self.run_pinned("c01", None, prefix=None)
+        self.assertEqual(seen["env.txt.who"].strip(), "main-entry")
 
 
 if __name__ == "__main__":
