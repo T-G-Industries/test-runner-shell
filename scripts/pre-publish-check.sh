@@ -45,6 +45,9 @@ grep -qF "/opt/trs/scripts/" .github/workflows/live-suite.yml || bad="$bad live-
 for v in PRIVATE_TOKEN PRIVATE_REPO RELEASE_TOKEN GITHUB_TOKEN RUNNER_TEMP RUNNER_WORKSPACE GITHUB_WORKSPACE GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT PIN_REF PIN_PREFIX; do
   grep -qE -- "-u $v([[:space:]]|\\\\|$)" scripts/run-private.sh || bad="$bad run-private.sh does not unset $v;"
 done
+ru=$(grep -nE -- "-u RUNNER_TEMP([[:space:]]|\\\\|$)" scripts/run-private.sh | head -1 | cut -d: -f1)
+rs=$(grep -nF 'RUNNER_TEMP="$ptmp"' scripts/run-private.sh | head -1 | cut -d: -f1)
+{ [ -n "$ru" ] && [ -n "$rs" ] && [ "$ru" -le "$rs" ]; } || bad="$bad run-private.sh must unset RUNNER_TEMP and then re-export a private one after it;"
 grep -qF "origin/main" scripts/run-private.sh || bad="$bad run-private.sh does not pin the entry scripts;"
 grep -qF "refs/remotes/origin/\$PIN_REF" scripts/run-private.sh || bad="$bad run-private.sh lacks the pinned-branch lookup;"
 grep -qF 'PIN_REF: ${{ inputs.pin_ref }}' .github/workflows/live-suite.yml || bad="$bad live-suite.yml does not pass pin_ref through env;"

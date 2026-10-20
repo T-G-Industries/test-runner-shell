@@ -133,7 +133,7 @@ GOOD_CHECKS = "# checks from main\n"
 EVIL_ENTRY = '#!/usr/bin/env bash\necho pr-entry > "$ENVDUMP.who"\necho \'{}\' > "$RESULT_JSON"\n'
 MAIN = {"scripts/public-runner.sh": GOOD_ENTRY, "scripts/public-checks.sh": GOOD_CHECKS}
 SECRET_ENV = ("RELEASE_TOKEN", "PRIVATE_TOKEN", "PRIVATE_REPO", "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT",
-              "GITHUB_STATE", "GITHUB_STEP_SUMMARY", "RUNNER_TEMP", "RUNNER_WORKSPACE", "GITHUB_WORKSPACE",
+              "GITHUB_STATE", "GITHUB_STEP_SUMMARY", "RUNNER_WORKSPACE", "GITHUB_WORKSPACE",
               "GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
               "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_CACHE_URL", "ACTIONS_RESULTS_URL")
 
@@ -193,6 +193,121 @@ class Run(Helpers, unittest.TestCase):
         r, dumped, got, rc = self.run_entry("s01")
         self.assertEqual((r.returncode, got, rc), (0, "s01", "0"))
         self.assertTrue(("\nRELEASE_TOKEN=" + TOKEN + "\n") in ("\n" + dumped))
+
+    # RUNNER_TEMP: the real private entry script requires it (": ${RUNNER_TEMP:?}"). A check code gets a fresh private
+    # directory, never the runner's own _temp (which holds the file-command files), and it is removed afterwards.
+    def temp_probe_entry(self, rc=0):
+        return ('#!/usr/bin/env bash\nset -u\n'
+                'echo "$RUNNER_TEMP" > "$ENVDUMP.rt"\n'
+                '[ -d "$RUNNER_TEMP" ] && echo yes > "$ENVDUMP.isdir"\n'
+                'stat -c %%a "$RUNNER_TEMP" > "$ENVDUMP.mode"\n'
+                'ls -A "$RUNNER_TEMP" > "$ENVDUMP.ls"\n'
+                'echo scratch > "$RUNNER_TEMP/step1.log"\n'
+                'env | sort > "$ENVDUMP"\n'
+                'echo \'{}\' > "$RESULT_JSON"\nexit %d\n' % rc)
+
+    def run_probe(self, code, rc=0, extra=None):
+        with tempfile.TemporaryDirectory() as d:
+            files = {"scripts/public-runner.sh": self.temp_probe_entry(rc), "scripts/public-checks.sh": GOOD_CHECKS}
+            work = make_work(d, files, files)
+            r, out = self.run_script(d, work, code, extra=extra)
+            rt = self.read(d, "env.txt.rt").strip() if os.path.exists(os.path.join(d, "env.txt.rt")) else None
+            info = {"r": r, "rt": rt, "exit": self.read(d, "out/exit_code").strip()}
+            for k in ("isdir", "mode", "ls"):
+                path = os.path.join(d, "env.txt." + k)
+                info[k] = self.read(d, "env.txt." + k).strip() if os.path.exists(path) else None
+            info["env"] = self.read(d, "env.txt")
+            info["after"] = os.path.lexists(rt) if rt else None
+            return info
+
+    def test_check_code_gets_a_fresh_private_runner_temp(self):
+        for code in ("c01", "c02", "c03", "c04", "c05", "c06"):
+            i = self.run_probe(code)
+            self.assertEqual((i["r"].returncode, i["exit"]), (0, "0"), code)
+            self.assertTrue(i["rt"] and os.path.isabs(i["rt"]), code)
+            self.assertNotEqual(i["rt"], "/nonexistent/tmp", code)
+            self.assertEqual(i["isdir"], "yes", code)
+            self.assertEqual(i["mode"], "700", code)
+            self.assertEqual(i["ls"], "", code)  # empty at start: no set_env / add_path / file-command files
+            self.assertFalse(i["after"], code + ": removed afterwards")
+            self.assertNotIn("RUNNER_TEMP=/nonexistent/tmp", i["env"].split("\n"))
+            self.assertNotIn("GITHUB_ENV", i["env"])
+            self.assertNotIn("RUNNER_WORKSPACE", i["env"])
+            self.assertNotIn("GITHUB_WORKSPACE", i["env"])
+
+    def test_check_code_never_gets_the_real_runner_temp_or_its_file_commands(self):
+        with tempfile.TemporaryDirectory() as real:
+            os.makedirs(os.path.join(real, "_runner_file_commands"))
+            for n in ("set_env_123", "add_path_123", "save_state_123"):
+                with open(os.path.join(real, "_runner_file_commands", n), "w") as f:
+                    f.write("x=1\n")
+            i = self.run_probe("c04", extra={"RUNNER_TEMP": real})
+            self.assertNotEqual(i["rt"], real)
+            self.assertFalse(i["rt"].startswith(real + os.sep))
+            self.assertEqual(i["ls"], "")
+            self.assertFalse(i["after"])
+            self.assertEqual(sorted(os.listdir(real)), ["_runner_file_commands"])  # untouched
+            self.assertEqual(len(os.listdir(os.path.join(real, "_runner_file_commands"))), 3)
+
+    def test_check_code_works_when_the_runner_temp_was_never_set(self):
+        with tempfile.TemporaryDirectory() as d:
+            files = {"scripts/public-runner.sh": self.temp_probe_entry(), "scripts/public-checks.sh": GOOD_CHECKS}
+            work = make_work(d, files, files)
+            env = dict(base_env(), OUT=os.path.join(d, "out"), ENVDUMP=os.path.join(d, "env.txt"))
+            r = subprocess.run(["bash", os.path.join(SCRIPTS, "run-private.sh"), work, "c04"],
+                               env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0)
+            self.assertEqual(self.read(d, "out/exit_code").strip(), "0")
+            self.assertFalse(os.path.lexists(self.read(d, "env.txt.rt").strip()))
+
+    def test_runner_temp_is_removed_when_the_entry_fails(self):
+        i = self.run_probe("c02", rc=3)
+        self.assertEqual(i["exit"], "3")
+        self.assertTrue(i["rt"])
+        self.assertFalse(i["after"])
+
+    def test_simultaneous_check_codes_get_different_temp_dirs(self):
+        with tempfile.TemporaryDirectory() as d1, tempfile.TemporaryDirectory() as d2:
+            files = {"scripts/public-runner.sh": self.temp_probe_entry(), "scripts/public-checks.sh": GOOD_CHECKS}
+            works = [make_work(d1, files, files), make_work(d2, files, files)]
+            procs = []
+            for d, w in ((d1, works[0]), (d2, works[1])):
+                env = dict(base_env(), OUT=os.path.join(d, "out"), ENVDUMP=os.path.join(d, "env.txt"))
+                procs.append(subprocess.Popen(["bash", os.path.join(SCRIPTS, "run-private.sh"), w, "c05"],
+                                              env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+            for p in procs:
+                p.communicate()
+                self.assertEqual(p.returncode, 0)
+            a, b = (self.read(d, "env.txt.rt").strip() for d in (d1, d2))
+            self.assertNotEqual(a, b)
+            self.assertFalse(os.path.lexists(a) or os.path.lexists(b))
+
+    def test_setup_failure_creates_no_temp_dir(self):
+        import glob
+        before = set(glob.glob("/tmp/trs-private.*"))
+        with tempfile.TemporaryDirectory() as d:
+            work = make_work(d, MAIN, None)  # no origin/main: setup failure
+            r, out = self.run_script(d, work, "c01")
+            self.assertFalse(os.path.exists(os.path.join(d, "env.txt.who")))
+        self.assertEqual(set(glob.glob("/tmp/trs-private.*")), before)
+
+    def test_suite_code_runner_temp_is_unchanged(self):
+        r, dumped, got, rc = self.run_entry("s01")
+        self.assertTrue(("\nRUNNER_TEMP=/nonexistent/tmp\n") in ("\n" + dumped))
+        self.assertTrue(("\nRUNNER_WORKSPACE=/nonexistent/rw\n") in ("\n" + dumped))
+        self.assertTrue(("\nGITHUB_WORKSPACE=/nonexistent/gw\n") in ("\n" + dumped))
+        self.assertTrue(("\nGITHUB_ENV=/nonexistent/env\n") in ("\n" + dumped))
+
+    def test_check_code_env_differs_from_suite_code_only_as_documented(self):
+        # the variables a check code lacks compared with an s code are exactly the scrubbed ones; RUNNER_TEMP is
+        # present for both (a private directory for the check code), and nothing else is added or lost
+        _, c_dump, _, _ = self.run_entry("c01")
+        _, s_dump, _, _ = self.run_entry("s01")
+        names = lambda t: {l.split("=", 1)[0] for l in t.splitlines() if "=" in l}
+        missing = names(s_dump) - names(c_dump)
+        self.assertEqual(missing, set(SECRET_ENV))
+        self.assertIn("RUNNER_TEMP", names(c_dump))
+        self.assertEqual(names(c_dump) - names(s_dump), set())
 
     def test_check_code_does_not_need_the_token_in_the_environment(self):
         with tempfile.TemporaryDirectory() as d:
