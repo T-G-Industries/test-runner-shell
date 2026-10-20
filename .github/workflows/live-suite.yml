@@ -1,8 +1,8 @@
 name: Run a suite
 
-# Started by hand only. The only trigger in this file is workflow_dispatch; do not
-# add another (see SECURITY.md). The suite is an opaque code, so the run title
-# shows no module name.
+# The only trigger in this file is workflow_dispatch; do not add another (see
+# SECURITY.md). Runs are started by hand or by the dispatch calls of poll.yml. The
+# suite is an opaque code, so the run title shows no module name.
 run-name: "run ${{ inputs.suite_code }}"
 
 on:
@@ -13,7 +13,7 @@ on:
         type: string
         required: true
       suite_code:
-        description: "Suite code (s01, s02, ...)"
+        description: "Code (s01, s02, ... or c01, c02, ...)"
         type: string
         required: true
       pr:
@@ -39,9 +39,8 @@ jobs:
     timeout-minutes: 240
     # Secrets live in this environment, restricted to the main branch of this repository.
     environment: private-code
+    # No secret at job level: each step below lists only the secrets it needs.
     env:
-      PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
-      PRIVATE_TOKEN: ${{ secrets.PRIVATE_TOKEN }}
       SHA: ${{ inputs.sha }}
       SUITE_CODE: ${{ inputs.suite_code }}
       PR: ${{ inputs.pr }}
@@ -50,9 +49,13 @@ jobs:
       TZ: Asia/Kolkata
     steps:
       - name: Validate the inputs
+        id: validate
+        env:
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          PRIVATE_TOKEN: ${{ secrets.PRIVATE_TOKEN }}
         run: |
           [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be 40 hex characters"; exit 1; }
-          [[ $SUITE_CODE =~ ^s[0-9]{2}$ ]] || { echo "::error::bad suite code"; exit 1; }
+          [[ $SUITE_CODE =~ ^[sc][0-9]{2}$ ]] || { echo "::error::bad suite code"; exit 1; }
           [[ -z $PR || $PR =~ ^[0-9]{1,6}$ ]] || { echo "::error::bad pr number"; exit 1; }
           [ -n "$PRIVATE_REPO" ] && [ -n "$PRIVATE_TOKEN" ] || { echo "::error::secrets missing"; exit 1; }
 
@@ -61,24 +64,61 @@ jobs:
         with:
           persist-credentials: false
 
+      # Every later step runs the scripts from this root-owned, read-only copy, and the
+      # writable copy in the workspace is removed. The code under test runs as the same
+      # user and the runner has passwordless sudo, so this raises the bar; it is not a
+      # sandbox (see SECURITY.md rule 6).
+      - name: Lock a copy of the public scripts
+        id: lock
+        run: |
+          sudo install -d -m 0755 -o root -g root /opt/trs
+          sudo cp -r scripts /opt/trs/
+          sudo chown -R root:root /opt/trs
+          sudo chmod -R go-w,a+rX /opt/trs
+          rm -rf scripts
+
       - name: Mark the commit pending
-        run: bash scripts/report.sh pending
+        id: pending
+        env:
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          PRIVATE_TOKEN: ${{ secrets.PRIVATE_TOKEN }}
+        run: bash /opt/trs/scripts/report.sh pending
 
       - name: Fetch the private code (output withheld)
-        run: bash scripts/fetch-private.sh "$WORK"
+        id: fetch
+        env:
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          PRIVATE_TOKEN: ${{ secrets.PRIVATE_TOKEN }}
+        run: bash /opt/trs/scripts/fetch-private.sh "$WORK"
 
       - name: Free runner disk space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
 
+      # Suite codes get the token, for image loading.
       - name: Run the suite (output withheld)
-        id: suite
-        run: bash scripts/run-private.sh "$WORK" "$SUITE_CODE"
+        id: run_suite
+        if: ${{ startsWith(inputs.suite_code, 's') }}
+        env:
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          PRIVATE_TOKEN: ${{ secrets.PRIVATE_TOKEN }}
+        run: bash /opt/trs/scripts/run-private.sh "$WORK" "$SUITE_CODE"
 
-      - name: Report (numbers only)
-        if: always()
+      # Check codes run code from the commit under test: no secret is referenced in this step.
+      - name: Run the check (output withheld)
+        id: run_check
+        if: ${{ startsWith(inputs.suite_code, 'c') }}
+        run: bash /opt/trs/scripts/run-private.sh "$WORK" "$SUITE_CODE"
+
+      - name: Report (fixed words and numbers only)
+        id: report
+        if: ${{ always() && steps.validate.outcome == 'success' && steps.lock.outcome == 'success' }}
+        env:
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          PRIVATE_TOKEN: ${{ secrets.PRIVATE_TOKEN }}
         run: |
-          python3 -I scripts/sanitize.py "$OUT/result.json" "$OUT/exit_code" "$OUT/status.json" | tee -a "$GITHUB_STEP_SUMMARY"
-          bash scripts/report.sh final
+          export PATH=/usr/bin:/bin
+          python3 -I /opt/trs/scripts/sanitize.py "$OUT/result.json" "$OUT/exit_code" "$OUT/status.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          bash /opt/trs/scripts/report.sh final
 
       - name: Remove the private checkout
         if: always()

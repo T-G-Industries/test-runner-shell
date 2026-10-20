@@ -5,25 +5,40 @@ and range; the output is built from those checked values and fixed words. No byt
 of any log is ever copied through. Anything unexpected becomes NOT A RESULT.
 """
 import json
+import re
 import sys
 
 REASONS = {"ok", "skips", "setup", "timeout", "missing", "fail"}
+# The status name the result is reported under. Written to status.json only, never printed.
+CONTEXT_RE = re.compile(r"[A-Za-z0-9 ()/,.:+_*-]{1,100}")
+# Names the shell itself writes (the poller's marker and the suite status). A commit under
+# test must not be able to choose them, so a name starting with one is dropped.
+RESERVED_PREFIXES = ("ci/", "live/")
+
+
+def clean_context(value):
+    if not isinstance(value, str) or not CONTEXT_RE.fullmatch(value):
+        return None
+    if value != value.strip() or value.lower().startswith(RESERVED_PREFIXES):
+        return None
+    return value
 
 
 def load(result_path, exit_path):
     try:
         with open(exit_path) as f:
             rc = int(f.read().strip())
-    except (OSError, ValueError):
+    except Exception:  # unreadable or odd input is never a crash and never a pass
         rc = -1
     try:
         with open(result_path) as f:
             raw = json.load(f)
-    except (OSError, ValueError):
+    except Exception:  # includes RecursionError on deeply nested JSON and bad UTF-8
         raw = None
     if not isinstance(raw, dict):
-        return rc, {"passed": 0, "failed": 0, "skipped": 0, "errors": 0, "counted": False, "reason": "missing"}
-    res = {}
+        return rc, {"passed": 0, "failed": 0, "skipped": 0, "errors": 0, "counted": False, "reason": "missing",
+                    "context": None}
+    res = {"context": clean_context(raw.get("context"))}
     for k in ("passed", "failed", "skipped", "errors"):
         v = raw.get(k)
         res[k] = v if isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 1_000_000 else None
@@ -49,8 +64,11 @@ def main(result_path, exit_path, status_path):
         word, res["passed"], res["failed"], res["errors"], res["skipped"])
     if word == "NOT A RESULT":
         desc = "NOT A RESULT (%s)" % res["reason"]
+    status = {"state": state, "description": desc[:140]}
+    if res["context"]:
+        status["context"] = res["context"]
     with open(status_path, "w") as f:
-        json.dump({"state": state, "description": desc[:140]}, f)
+        json.dump(status, f)
     print("### " + desc)
     return 0
 

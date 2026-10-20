@@ -1,0 +1,40 @@
+name: Start missing runs
+
+# Held off: the cron trigger is added in a later change, once the private side is on main.
+# The only workflow allowed a schedule trigger (see SECURITY.md). It starts runs of
+# live-suite.yml and does nothing else. Its log shows two integers only.
+run-name: "poll"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: poll
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash -eo pipefail {0}
+
+jobs:
+  poll:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Secrets live in this environment, restricted to the main branch of this repository.
+    environment: private-code
+    steps:
+      - name: Check out this repository (scripts only)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Start missing runs (numbers only)
+        env:
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          PRIVATE_TOKEN: ${{ secrets.PRIVATE_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash scripts/poll.sh
