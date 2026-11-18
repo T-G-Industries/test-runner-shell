@@ -32,6 +32,26 @@ def has_secret(step):
     return "secrets." in str(step)
 
 
+def suite_code_pattern(text):
+    # The regex of the `[[ $SUITE_CODE =~ ... ]]` check, as written in the file.
+    m = re.search(r"\[\[ \$SUITE_CODE =~ (\^\S+\$) \]\]", text)
+    assert m, "no SUITE_CODE check found"
+    return m.group(1)
+
+
+def run_validate(**env):
+    # Runs the validate step of live-suite.yml with synthetic inputs; returns its exit code.
+    doc, _ = load("live-suite.yml")
+    base = {"PATH": os.environ["PATH"], "SHA": "a" * 40, "SUITE_CODE": "c01", "PR": "",
+            "PRIVATE_REPO": "owner-x/repo-y", "PRIVATE_TOKEN": "tok-synthetic-value"}
+    return subprocess.run(["bash", "-eo", "pipefail", "-c", steps_of(doc, "run")[0]["run"]],
+                          env=dict(base, **env), capture_output=True, text=True).returncode
+
+
+def bash_matches(pattern, code):
+    return subprocess.run(["bash", "-c", '[[ $1 =~ $2 ]]', "x", code, pattern]).returncode == 0
+
+
 class Live(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -111,8 +131,15 @@ class Live(unittest.TestCase):
     def test_validate_is_first_and_checks_all_three_inputs(self):
         self.assertEqual(self.steps[0].get("id"), "validate")
         run = self.steps[0]["run"]
-        for needle in ("[0-9a-f]{40}", "[sc][0-9]{2}", "[0-9]{1,6}"):
+        for needle in ("[0-9a-f]{40}", "^(s[0-9]{2}|s62[a-d]|c[0-9]{2})$", "[0-9]{1,6}"):
             self.assertIn(needle, run)
+
+    def test_suite_code_accepts_s_nn_the_s62_shards_and_c_nn_only(self):
+        # The same pattern is checked in scripts/report.sh (see Repo.test_report_sh_suite_code_pattern_matches).
+        for code in ("s01", "s62", "s62a", "s62b", "s62c", "s62d", "c01", "c06"):
+            self.assertEqual(run_validate(SUITE_CODE=code), 0, code)
+        for code in ("s62e", "s62ab", "s62A", "c01a", "s6", "x01", "s620"):
+            self.assertNotEqual(run_validate(SUITE_CODE=code), 0, code)
 
     def test_report_step_has_a_clean_path(self):
         run = by_id(self.steps, "report")["run"]
@@ -189,6 +216,18 @@ class Poll(unittest.TestCase):
 
 
 class Repo(unittest.TestCase):
+    def test_report_sh_suite_code_pattern_matches(self):
+        with open(os.path.join(HERE, "..", "scripts", "report.sh")) as f:
+            report = f.read()
+        with open(os.path.join(WF, "live-suite.yml")) as f:
+            live = f.read()
+        pattern = suite_code_pattern(report)
+        self.assertEqual(pattern, suite_code_pattern(live))
+        for code in ("s01", "s62", "s62a", "s62d", "c01", "c06"):
+            self.assertTrue(bash_matches(pattern, code), code)
+        for code in ("s62e", "s62ab", "s62A", "c01a", "s6", "x01"):
+            self.assertFalse(bash_matches(pattern, code), code)
+
     def test_every_workflow_is_covered_here(self):
         self.assertEqual(sorted(os.path.basename(p) for p in glob.glob(os.path.join(WF, "*.yml"))),
                          ["live-suite.yml", "poll.yml"])

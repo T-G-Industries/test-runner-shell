@@ -20,7 +20,7 @@ mode="${1:-}"
 bad() { echo "::error::bad input"; exit 1; }
 case "$mode" in pending|final) ;; *) bad;; esac
 [[ $SHA =~ ^[0-9a-f]{40}$ ]] || bad
-[[ $SUITE_CODE =~ ^[sc][0-9]{2}$ ]] || bad
+[[ $SUITE_CODE =~ ^(s[0-9]{2}|s62[a-d]|c[0-9]{2})$ ]] || bad
 [[ -z ${PR:-} || ${PR:-} =~ ^[0-9]{1,6}$ ]] || bad
 api="https://api.github.com/repos/${PRIVATE_REPO}"
 url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
